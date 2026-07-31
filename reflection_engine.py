@@ -878,22 +878,38 @@ class ReflectionEngine:
                 "diary_memory": {"status": "skipped", "reason": "no_materials"},
             }
 
-        reflect_client, _, _ = self._reflect_model_client()
-        if reflect_client:
+        reflect_client, reflect_model, _ = self._reflect_model_client()
+        if not reflect_client or not reflect_model:
+            return self._reflection_generation_skipped(
+                period,
+                key,
+                bucket_id,
+                materials,
+                reason="generator_unavailable",
+            )
+        try:
             result = await self._api_reflect(period, key, materials)
-        else:
-            result = self._fallback_reflection(period, key, materials)
+        except Exception as exc:
+            logger.warning("Reflection generation failed; skipping %s %s: %s", period, key, exc)
+            return self._reflection_generation_skipped(
+                period,
+                key,
+                bucket_id,
+                materials,
+                reason="generator_error",
+            )
 
         title = str(result.get("title") or f"{key} {'日印象' if period == 'daily' else '周印象'}")[:40]
         content = str(result.get("content") or "").strip()
-        if not content:
-            content = self._fallback_reflection(period, key, materials)["content"]
-        if self.relationship_weather_affect_anchor_enabled:
-            content = self._append_affect_anchor(
-                content,
-                self._normalize_affect_anchor(result.get("affect_anchor"))
-                or self._fallback_reflection(period, key, materials).get("affect_anchor", {}),
-            )
+        first_person = bool("我" in content or re.search(r"(?i)\b(?:i|me|my|mine|myself)\b", content))
+        has_markdown_section = bool(re.search(r"(?m)^\s{0,3}#{1,6}\s+", content))
+        if not content or not first_person or has_markdown_section:
+            return self._reflection_generation_skipped(
+                period,
+                key,
+                bucket_id,
+                materials,
+                reason="invalid_model_output",            )
         tags = list(
             dict.fromkeys(
                 [
@@ -1426,7 +1442,7 @@ class ReflectionEngine:
     async def _api_reflect(self, period: str, key: str, materials: dict) -> dict:
         client, model, use_dehydration = self._reflect_model_client()
         if not client or not model:
-            return self._fallback_reflection(period, key, materials)
+            raise RuntimeError("reflection_generator_unavailable")
         payload = {"period": period, "date": key, **materials}
         response = await client.chat.completions.create(
             model=model,
@@ -1441,7 +1457,41 @@ class ReflectionEngine:
             ),
         )
         raw = response.choices[0].message.content if response.choices else ""
-        return self._parse_json_object(raw or "") or self._fallback_reflection(period, key, materials)
+        parsed = self._parse_json_object(raw or "")
+        if not parsed:
+            raise ValueError("reflection_invalid_model_output")
+        return parsed
+
+    @staticmethod
+    def _reflection_generation_skipped(
+        period: str,
+        key: str,
+        bucket_id: str,
+        materials: dict,
+        *,
+        reason: str,
+    ) -> dict:
+        diary = materials.get("diary") or {}
+        return {
+            "status": "skipped",
+            "reason": reason,
+            "period": period,
+            "id": bucket_id,
+            "date": key,
+            "diary": {
+                "found": bool(diary),
+                "diary_id": diary.get("id") if diary else None,
+            },
+            "diary_memory": {"status": "skipped", "reason": reason},
+            "materials": {
+                "buckets": len(materials.get("buckets", [])),
+                "daily_impressions": len(materials.get("daily_impressions", [])),
+                "daily_chat_memories": len(materials.get("daily_chat_memories", [])),
+                "persona_events": len(materials.get("persona_events", [])),
+                "conversation_turns": len(materials.get("conversation_turns", [])),
+                "commitments": len(materials.get("commitments", [])),
+            },
+        }
 
     async def _reflection_materials(
         self,
@@ -3567,45 +3617,6 @@ class ReflectionEngine:
     def _daily_chat_memory_candidate_id(key: str, kind: str, content: str) -> str:
         digest = hashlib.sha1(f"{key}|{kind}|{content}".encode("utf-8")).hexdigest()[:10]
         return f"daily_chat_memory_{str(key).replace('-', '')}_{digest}"
-
-    def _fallback_reflection(self, period: str, key: str, materials: dict) -> dict:
-        weather_items = materials.get("daily_impressions", []) if period == "weekly" else []
-        names = [item.get("name") or item.get("id") for item in weather_items[:7]]
-        if not names:
-            names = [item.get("name") or item.get("id") for item in materials.get("buckets", [])[:6]]
-        daily_chat_memories = materials.get("daily_chat_memories", [])
-        conversation_turns = materials.get("conversation_turns", [])
-        label = "今天" if period == "daily" else "本周"
-        title = f"{key} {'日印象' if period == 'daily' else '周印象'}"
-        diary = materials.get("diary") or {}
-        if daily_chat_memories:
-            first = daily_chat_memories[0].get("content") or daily_chat_memories[0].get("title") or "自动记忆挑出的线头"
-            content = f"{label}的关系天气先从自动记忆挑出的 {len(daily_chat_memories)} 个线头里成形，最清楚的是：{first}。"
-        elif conversation_turns:
-            content = f"{label}的关系天气从 {len(conversation_turns)} 轮短期对话里留下一点原声，先只记温度，不把流水账写成事件清单。"
-        elif diary:
-            diary_title = diary.get("title") or "当天日记"
-            content = f"{label}的关系天气从《{diary_title}》里轻轻留下一点温度，先不把日常写成普通记忆。"
-        else:
-            content = f"{label}的关系天气很轻，暂时没有明显需要带走的脉络。"
-        anchor_scene = names[0] if names else (
-            daily_chat_memories[0].get("title") or daily_chat_memories[0].get("content")
-            if daily_chat_memories
-            else (
-            "当天短期对话的原声"
-            if conversation_turns
-            else (diary.get("title") if diary else ("这一段关系天气很轻" if period == "daily" else "这一周的关系天气慢慢落下"))
-            )
-        )
-        return {
-            "title": title,
-            "content": content,
-            "valence": 0.55,
-            "arousal": 0.3,
-            "confidence": 0.5,
-            "tags": ["relationship_weather"],
-            "affect_anchor": self._fallback_reflection_anchor(period, key, str(anchor_scene), content),
-        }
 
     def _fallback_reflection_anchor(self, period: str, key: str, scene: str, content: str) -> dict:
         seed = f"{period}|{key}|{scene}|{content}"
