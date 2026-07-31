@@ -3575,15 +3575,10 @@ class ReflectionEngine:
             names = [item.get("name") or item.get("id") for item in materials.get("buckets", [])[:6]]
         daily_chat_memories = materials.get("daily_chat_memories", [])
         conversation_turns = materials.get("conversation_turns", [])
-        commitments = [item.get("name") or item.get("id") for item in materials.get("commitments", [])[:4]]
         label = "今天" if period == "daily" else "本周"
         title = f"{key} {'日印象' if period == 'daily' else '周印象'}"
         diary = materials.get("diary") or {}
-        if names or commitments:
-            main = "、".join([name for name in names if name])
-            owed = "；仍需记住：" + "、".join(commitments) if commitments else ""
-            content = f"{label}的关系天气：围绕{main or '几件轻小的事'}留下痕迹{owed}。"
-        elif daily_chat_memories:
+        if daily_chat_memories:
             first = daily_chat_memories[0].get("content") or daily_chat_memories[0].get("title") or "自动记忆挑出的线头"
             content = f"{label}的关系天气先从自动记忆挑出的 {len(daily_chat_memories)} 个线头里成形，最清楚的是：{first}。"
         elif conversation_turns:
