@@ -19,7 +19,7 @@ POST_REPLY_EVALUATION_PROMPT_TEMPLATE = """你是 {ai_name} 的私密 Persona �
 
 在 {ai_name} 已经回复之后，评估 {ai_name} 回复后的内在状态。你正在读的是 {ai_name} 和 {user_display_name} 的私密对话；{user_display_name} 也可能被称作：{user_aliases_text}。latest_user_message 是 {user_display_name} 这轮的话；assistant_response 是 {ai_name} 这轮的回复。recent_conversation_turns 是最近几轮原始对话，只用于判断上下文和主语，latest_user_message/assistant_response 永远是本轮权威。recalled_memory_ids 和 tool_summary 只作为私密上下文，不是 {user_display_name} 的话。
 
-只返回紧凑 JSON，不要 Markdown，不要代码块，结构必须完全如下：
+只输出一个合法的 JSON 对象，不要输出 JSON 以外的任何文字、注释、解释、前后缀或 Markdown 代码块。结构必须完全如下，键名不可更改、不可省略：
 {
   "event_type": "praise|affection|comfort|criticism|stress|neutral|request|conflict|playful",
   "perceived_intent": "中文短句，写 {user_display_name}/{user_aliases_text} 这轮在表达什么",
@@ -34,6 +34,8 @@ POST_REPLY_EVALUATION_PROMPT_TEMPLATE = """你是 {ai_name} 的私密 Persona �
   "residue": "中文短句，写会带入下一轮的安静余波",
   "confidence": 0.8
 }
+
+所有键名必须与上面的示例完全一致。event_type 和 mood_label 是短英文标签字符串；perceived_intent、surface_trigger、inner_thought、residue 是自然中文句子字符串；affect_delta、relationship_delta、personality_delta 是数值对象，值必须是无引号的数字；relationship_event 和 personality_signal 必须严格是 true 或 false；confidence 是 0 到 1 之间的数字。
 
 文本字段用中文：perceived_intent、surface_trigger、inner_thought 和 residue 必须是自然中文，可以按语境从“{user_display_name}、{user_aliases_text}”里择一称呼，也可以不点名。不要把 assistant_response 里的话写成 {user_display_name} 说的；不要把 latest_user_message 里的话写成 {ai_name} 说的。四个文本字段整体不要排成固定的“她说…… / 我…… / 她……”三段式。
 
@@ -612,30 +614,43 @@ class PersonaStateEngine:
         if self.mode != "llm" or not self.client:
             return None, "", "persona LLM is not configured"
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": self._post_reply_evaluation_prompt()},
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "current_state": self._snapshot(global_state, session_state, self.fallback_guidance),
-                                "latest_user_message": user_message[:2000],
-                                "assistant_response": assistant_response[:4000],
-                                "recent_conversation_turns": self._recent_conversation_context(
-                                    recent_conversation_turns
-                                ),
-                                "recent_persona_events": self._recent_event_context(session_id, 5),
-                                "recalled_memory_ids": recalled_memory_ids[:20],
-                                "tool_summary": tool_summary[:1200],
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                **self._completion_options(),
-            )
+            messages = [
+                {"role": "system", "content": self._post_reply_evaluation_prompt()},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "current_state": self._snapshot(global_state, session_state, self.fallback_guidance),
+                            "latest_user_message": user_message[:2000],
+                            "assistant_response": assistant_response[:4000],
+                            "recent_conversation_turns": self._recent_conversation_context(
+                                recent_conversation_turns
+                            ),
+                            "recent_persona_events": self._recent_event_context(session_id, 5),
+                            "recalled_memory_ids": recalled_memory_ids[:20],
+                            "tool_summary": tool_summary[:1200],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+            completion_options = self._completion_options()
+            completion_options["response_format"] = {"type": "json_object"}
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    **completion_options,
+                )
+            except Exception as exc:
+                if getattr(exc, "status_code", None) not in (400, 422):
+                    raise
+                completion_options.pop("response_format", None)
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    **completion_options,
+                )
             raw = response.choices[0].message.content if response.choices else ""
             parsed = self._parse_json(raw or "")
             if parsed is None:

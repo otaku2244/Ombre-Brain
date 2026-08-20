@@ -3190,7 +3190,7 @@ async def breath_hook(request):
             if token_budget <= 0:
                 break
             summary = await dehydrator.dehydrate(_bucket_text_for_embedding(b), {k: v for k, v in b["metadata"].items() if k != "tags"})
-            entry = f"⚓ [长期锚点] [bucket_id:{b['id']}] {summary}"
+            entry = f"⚓ [长期锚点] [bucket_id:{b['id']}] {summary}{_affinity_meta(b)}"
             entry_tokens = count_tokens_approx(entry)
             if entry_tokens > token_budget:
                 break
@@ -5086,6 +5086,22 @@ def _bucket_date_meta_parts(bucket: dict | None = None, moment: dict | None = No
     return [f"[created:{created}]"] if created else []
 
 
+def _affinity_meta(bucket: dict) -> str:
+    """把桶的 domain / tags 暴露到表头，供下游从结构算亲和度（心潮记忆共振）。
+    格式：` [domain:恋爱,成长] [tags:自我,约定]`（逗号分隔，跟表头其它标记同风格）。
+    机读、可加、缺失时为空——没有 domain/tags 的桶输出不变，向后兼容。
+    """
+    meta = bucket.get("metadata", {}) or {}
+    domains = [str(d).strip() for d in (meta.get("domain") or []) if str(d).strip()]
+    tags = [str(t).strip() for t in (meta.get("tags") or []) if str(t).strip()]
+    parts = []
+    if domains:
+        parts.append(f"[domain:{','.join(domains)}]")
+    if tags:
+        parts.append(f"[tags:{','.join(tags)}]")
+    return (" " + " ".join(parts)) if parts else ""
+
+
 def _direct_bucket_header(bucket: dict, moment: dict) -> str:
     bucket_id = str(bucket.get("id") or moment.get("bucket_id") or "")
     title = _moment_bucket_title(moment) or str((bucket.get("metadata", {}) or {}).get("name") or bucket_id)
@@ -5093,7 +5109,7 @@ def _direct_bucket_header(bucket: dict, moment: dict) -> str:
     date_part = " ".join(_bucket_date_meta_parts(bucket, moment))
     return (
         f"[bucket_id:{bucket_id}] [moment_id:{moment.get('moment_id') or ''}] "
-        f"{date_part} {section} {title}"
+        f"{date_part} {section} {title}{_affinity_meta(bucket)}"
     ).strip()
 
 
@@ -7229,7 +7245,7 @@ async def breath(
             try:
                 clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
                 summary = await dehydrator.dehydrate(_bucket_text_for_embedding(b), clean_meta)
-                entry = f"📌 [核心准则] [bucket_id:{b['id']}] {summary}"
+                entry = f"📌 [核心准则] [bucket_id:{b['id']}] {summary}{_affinity_meta(b)}"
                 entry_tokens = count_tokens_approx(entry)
                 if entry_tokens > core_token_budget or entry_tokens > token_budget:
                     break
@@ -7280,7 +7296,7 @@ async def breath(
                 clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
                 summary = await dehydrator.dehydrate(_bucket_text_for_embedding(b), clean_meta)
                 score = decay_engine.calculate_score(b["metadata"])
-                entry = f"[权重:{score:.2f}] [bucket_id:{b['id']}] {summary}"
+                entry = f"[权重:{score:.2f}] [bucket_id:{b['id']}] {summary}{_affinity_meta(b)}"
                 entry_tokens = count_tokens_approx(entry)
                 if entry_tokens > token_budget:
                     break
@@ -8932,19 +8948,23 @@ async def pulse(include_archive: bool = False) -> str:
             score = decay_engine.calculate_score(meta)
         except Exception:
             score = 0.0
-        domains = ",".join(meta.get("domain", []))
+        domains = ",".join(meta.get("domain", [])) or "未分类"
         val = meta.get("valence", 0.5)
         aro = meta.get("arousal", 0.3)
         resolved_tag = " [已解决]" if meta.get("resolved", False) else ""
-        lines.append(
-            f"{icon} [{meta.get('name', b['id'])}]{resolved_tag} "
-            f"bucket_id:{b['id']} "
+        name = meta.get("name") or b["id"]
+        name_tag = f" 《{name}》"
+        line = (
+            f"{icon} [{b['id']}]{name_tag}{resolved_tag} "
             f"主题:{domains} "
             f"情感:V{val:.1f}/A{aro:.1f} "
             f"重要:{meta.get('importance', '?')} "
-            f"权重:{score:.2f} "
-            f"标签:{','.join(meta.get('tags', []))}"
+            f"权重:{score:.2f}"
         )
+        tags = [t for t in (meta.get("tags", []) or []) if not (t.startswith("__") and t.endswith("__"))]
+        if tags:
+            line += f" 标签:{','.join(tags)}"
+        lines.append(line)
 
     return status + "\n=== 记忆列表 ===\n" + "\n".join(lines)
 

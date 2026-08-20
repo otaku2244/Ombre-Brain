@@ -22,3 +22,4 @@ backup_*/
 *.db
 import_state.json
 .codex
+*.bak*
