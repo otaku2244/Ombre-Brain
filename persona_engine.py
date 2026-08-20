@@ -773,7 +773,6 @@ class PersonaStateEngine:
                 },
             ]
             completion_options = self._completion_options()
-            completion_options["response_format"] = {"type": "json_object"}
             try:
                 response = await self.client.chat.completions.create(
                     model=self.model,
